@@ -8,11 +8,14 @@ from streamlit.testing.v1 import AppTest
 from pawpal_system import Owner, Pet
 
 
-def make_app(tmp_path, monkeypatch):
+def make_app(tmp_path, monkeypatch, section="advisor", owner=None):
+    """An AppTest on the given section (the app itself opens on Home)."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PAWPAL_LLM", "mock")
     at = AppTest.from_file(str(__import__("pathlib").Path(__file__).resolve().parent.parent / "app.py"), default_timeout=30)
-    at.session_state["owner"] = Owner("Sam", 90, pets=[Pet("Rex", "dog", age=9, special_needs="diabetic")])
+    at.session_state["owner"] = owner or Owner("Sam", 90, pets=[Pet("Rex", "dog", age=9, special_needs="diabetic")])
+    if section:
+        at.session_state["section"] = section
     return at
 
 
@@ -81,3 +84,149 @@ def test_unapproved_activity_shown_last_and_can_be_added_to_knowledge(tmp_path, 
     next(b for b in at.button if b.label == "Ask the advisor").click().run()
     swim = next(pt for pt in at.session_state["proposal"].tasks if pt.task.title == "Swim session")
     assert swim.in_knowledge and swim.sources == ["user_added_dog#swim-session"]
+
+
+# ---- sidebar navigation and home page --------------------------------------------------
+def nav(at, label):
+    """Click a sidebar navigation button by its text."""
+    next(b for b in at.sidebar.button if label in b.label).click()
+    return at.run()
+
+
+def test_app_opens_on_home_with_hero_and_stats(tmp_path, monkeypatch):
+    at = make_app(tmp_path, monkeypatch, section=None).run()
+    assert not at.exception
+    assert at.session_state["section"] == "home"
+    assert len(at.get("image")) == 1  # the hero photo
+    assert {m.label for m in at.metric} == {"Pets", "Pending tasks", "Minutes available today"}
+    assert not at.text_area  # only the home page is drawn, not the advisor
+
+
+def test_sidebar_buttons_switch_sections_and_highlight_the_active_one(tmp_path, monkeypatch):
+    at = make_app(tmp_path, monkeypatch, section=None).run()
+    assert len(at.sidebar.button) == 5
+    for label, section, marker in [
+        ("My Pets", "pets", lambda a: any(t.label == "Owner name" for t in a.text_input)),
+        ("Tasks", "tasks", lambda a: any(t.label == "Task title" for t in a.text_input)),
+        ("AI Advisor", "advisor", lambda a: len(a.text_area) == 1),
+        ("Schedule", "schedule", lambda a: any(b.label == "Generate schedule" for b in a.button)),
+        ("Home", "home", lambda a: len(a.metric) == 3),
+    ]:
+        at = nav(at, label)
+        assert not at.exception
+        assert at.session_state["section"] == section and marker(at)
+        assert [b.proto.type for b in at.sidebar.button if label in b.label] == ["primary"]  # active one is highlighted
+        assert sum(b.proto.type == "primary" for b in at.sidebar.button) == 1
+
+
+@pytest.mark.parametrize("pets, tasks, cta", [
+    (False, False, "Add your first pet"),
+    (True, False, "Ask the AI Advisor for a routine"),
+    (True, True, "View today's schedule"),
+])
+def test_home_call_to_action_follows_progress(tmp_path, monkeypatch, pets, tasks, cta):
+    from pawpal_system import Task
+    owner = Owner("Sam", 90, pets=[Pet("Rex", "dog")] if pets else [])
+    if tasks:
+        owner.pets[0].add_task(Task("Walk", 20))
+    at = make_app(tmp_path, monkeypatch, section="home", owner=owner).run()
+    main_buttons = [b.label for b in at.main.button]
+    assert any(cta in label for label in main_buttons)
+
+
+def test_advisor_input_and_approvals_survive_switching_sections(tmp_path, monkeypatch):
+    at = make_app(tmp_path, monkeypatch).run()
+    at.text_area(key="advisor_request").set_value("Build a routine for Rex").run()
+    next(b for b in at.button if b.label == "Ask the advisor").click().run()
+    boxes = [c for c in at.checkbox if c.key.startswith("approve_")]
+    assert len(boxes) >= 2
+    boxes[0].set_value(False).run()  # untick the first suggestion
+
+    at = nav(at, "Tasks")
+    assert not at.text_area  # the advisor is not drawn while another section is open
+    at = nav(at, "AI Advisor")
+
+    assert at.text_area(key="advisor_request").value == "Build a routine for Rex"
+    again = [c for c in at.checkbox if c.key.startswith("approve_")]
+    assert [c.key for c in again] == [c.key for c in boxes]
+    assert again[0].value is False and all(c.value for c in again[1:])  # the untick was remembered
+    assert at.session_state["proposal"].status == "ok"
+
+
+def test_adding_approved_tasks_offers_a_shortcut_to_the_schedule(tmp_path, monkeypatch):
+    at = make_app(tmp_path, monkeypatch).run()
+    at.text_area(key="advisor_request").set_value("Build a routine for Rex").run()
+    next(b for b in at.button if b.label == "Ask the advisor").click().run()
+    next(b for b in at.button if b.label == "Add approved tasks").click().run()
+    shortcut = next(b for b in at.button if "View today's schedule" in b.label)
+    shortcut.click().run()
+    assert at.session_state["section"] == "schedule"
+    next(b for b in at.button if b.label == "Generate schedule").click().run()
+    assert any("Here is today's plan" in s.value for s in at.success)
+    nav(at, "Tasks")
+    at = nav(at, "Schedule")
+    assert any("Here is today's plan" in s.value for s in at.success)  # still shown after returning
+
+
+# ---- newest pet is pre-selected; schedule can be viewed per pet --------------------------
+def pet_select(at, label="Pet"):
+    return next(s for s in at.selectbox if s.label == label)
+
+
+def test_newly_added_pet_is_preselected_in_tasks_and_advisor(tmp_path, monkeypatch):
+    owner = Owner("Sam", 90, pets=[Pet("Rex", "dog"), Pet("Luna", "cat")])
+    at = make_app(tmp_path, monkeypatch, section="pets", owner=owner).run()
+    at.text_input[1].set_value("Mia")  # "Pet name" (the first text input is "Owner name")
+    next(b for b in at.button if b.label == "Add pet").click().run()
+    assert [p.name for p in at.session_state["owner"].pets] == ["Rex", "Luna", "Mia"]
+
+    at = nav(at, "Tasks")
+    assert pet_select(at).value == "Mia"  # not Rex, the first pet
+    at = nav(at, "AI Advisor")
+    assert pet_select(at).value == "Mia"
+
+
+def test_tasks_pet_defaults_to_newest_pet_even_without_adding_one(tmp_path, monkeypatch):
+    owner = Owner("Sam", 90, pets=[Pet("Rex", "dog"), Pet("Luna", "cat")])
+    at = make_app(tmp_path, monkeypatch, section="tasks", owner=owner).run()
+    assert pet_select(at).value == "Luna"
+
+
+def test_schedule_can_be_viewed_per_pet(tmp_path, monkeypatch):
+    from pawpal_system import Priority, Task
+    rex, luna = Pet("Rex", "dog"), Pet("Luna", "cat")
+    rex.add_task(Task("Walk", 30, Priority.HIGH))
+    rex.add_task(Task("Brush", 10, Priority.LOW))
+    luna.add_task(Task("Feed", 5, Priority.HIGH))
+    at = make_app(tmp_path, monkeypatch, section="schedule", owner=Owner("Sam", 90, pets=[rex, luna])).run()
+    next(b for b in at.button if b.label == "Generate schedule").click().run()
+
+    def pets_shown(a):
+        return set(a.table[0].value["Pet"])
+
+    box = pet_select(at, "Show plan for")
+    assert box.options == ["All pets", "Rex", "Luna"] and pets_shown(at) == {"Rex", "Luna"}
+
+    at = box.select("Luna").run()
+    assert pets_shown(at) == {"Luna"} and len(at.table[0].value) == 1
+    assert {m.label: m.value for m in at.metric}["Scheduled"] == "1 tasks"
+
+    at = pet_select(at, "Show plan for").select("Rex").run()
+    assert pets_shown(at) == {"Rex"} and len(at.table[0].value) == 2
+    assert any("for Rex" in s.value for s in at.success)
+    assert not at.exception
+
+    # the choice is remembered when switching sections
+    at = nav(at, "Tasks")
+    at = nav(at, "Schedule")
+    assert pet_select(at, "Show plan for").value == "Rex"
+
+
+def test_schedule_for_pet_without_tasks_says_so(tmp_path, monkeypatch):
+    from pawpal_system import Task
+    rex, luna = Pet("Rex", "dog"), Pet("Luna", "cat")
+    rex.add_task(Task("Walk", 30))
+    at = make_app(tmp_path, monkeypatch, section="schedule", owner=Owner("Sam", 90, pets=[rex, luna])).run()
+    next(b for b in at.button if b.label == "Generate schedule").click().run()
+    at = pet_select(at, "Show plan for").select("Luna").run()
+    assert any("Nothing is scheduled for Luna" in i.value for i in at.info)

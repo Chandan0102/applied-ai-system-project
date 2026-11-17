@@ -13,7 +13,8 @@ Owners usually know *that* they need a routine, not *what* a good one looks like
 | **Guardrails** | Prompt-injection stripping, empty/off-topic refusal, schema bounds, no doses, toxic-food check, life-stage check, mandatory "confirm with your vet" flag on medication tasks, duplicate and time-budget warnings. |
 | **Human-in-the-loop** | Proposals show sources, flags and confidence; each task has an approve checkbox; nothing is saved until "Add approved tasks". |
 | **Owner-requested activities** | Times in the request ("afternoon nap from 12 pm to 2 pm") are parsed by regex, not by the LLM, so a model can never change them. Activities found in the knowledge base are cited; others are listed last as *not in the approved knowledge base*, and the owner can add them to the knowledge base with one click. |
-| **Reliability testing** | 135 pytest tests, a 17-case evaluation harness (`eval/run_eval.py`), a 0-100 confidence score, and a JSONL log of every step. |
+| **Chat assistant** | A floating chat (bottom right, on every tab) that does what the tabs do: open tabs, switch pets, add pets and tasks, mark tasks done, list tasks, hand requests to the AI Advisor. A deterministic rule parser understands the commands; Gemini is only an optional fallback for phrasing the rules miss, and its output goes through the same validation. Anything that changes data shows a Confirm / Cancel card first. |
+| **Reliability testing** | 202 pytest tests, a 17-case evaluation harness (`eval/run_eval.py`), a 0-100 confidence score, and a JSONL log of every step. |
 
 ## Architecture overview
 Source: [diagrams/system_architecture.mmd](diagrams/system_architecture.mmd) (Mermaid).
@@ -35,14 +36,40 @@ Requires Python 3.10+. From the project folder:
 python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pytest -q                      # 135 tests, offline
+pytest -q                      # 202 tests, offline
 python -m eval.run_eval        # prints the results table, writes eval/results.md
 streamlit run app.py           # the app
 ```
 
 It runs fully offline by default (`MockClient`). The AI Care Advisor section has a **Model** selector (Mock / Gemini). To enable Gemini, copy `.env.example` to `.env` and set `GEMINI_API_KEY` (optionally `GEMINI_MODEL`, default `gemini-3.5-flash-lite`; model availability varies by key, list yours with `client.models.list()`). With Gemini selected, each call tries Gemini first; if it errors or returns an empty response, that call is answered by the mock instead. After every request the UI states what happened (for example "Round 1: Gemini answered, non-empty, valid JSON" or "Gemini returned an empty response, so the mock model was used instead"), and the same details are stored in the log. The fallback logic is unit-tested with a stand-in object (error, empty, valid and non-JSON replies); the live Gemini path was verified by hand with one request (valid JSON, 80/100 confidence), not in the automated tests.
 
-In the app: add an owner and a pet (e.g. Rex, dog, age 9, special needs "diabetic"), scroll to **AI Care Advisor**, type a request, review the proposal, tick the tasks you want, click **Add approved tasks**, then **Generate schedule**.
+### Using the app
+The app opens on **Home** (a photo, three live stats and a button that suggests your next step). The five buttons in the left sidebar switch what is shown in the centre; the highlighted button is where you are:
+
+| Button | What it shows |
+|---|---|
+| 🏠 Home | Welcome page, pets / pending tasks / minutes available, next-step button |
+| 🐕 My Pets | Owner name, minutes available today, add pets |
+| 📋 Tasks | Add tasks, filter and sort, mark complete, change times, find a free slot |
+| 🤖 AI Advisor | Ask for a routine, review sources, flags and confidence, approve tasks |
+| 📅 Schedule | Generate today's plan, with a dropdown to view all pets or one pet |
+
+**Chat assistant.** The 💬 Chat bubble at the bottom right opens a panel on any tab. Pick the pet in its "Selected pet" box (a newly added pet is selected automatically), then type commands such as:
+
+| You type | What happens |
+|---|---|
+| `open the schedule` / `show Rex's tasks` | switches tab (and filters to that pet) |
+| `add a 20 minute evening walk` | shows a confirm card, then adds it to the selected pet |
+| `add nap from 12 pm to 2 pm for Luna` | same, with the exact time pinned in the schedule |
+| `add a dog named Mia` | confirm card, then adds the pet |
+| `mark morning walk done` | confirm card, then completes it |
+| `what tasks does Rex have?` | answers in the chat |
+| `generate the schedule for Luna` | opens Schedule for that pet |
+| `suggest a routine for Rex` | opens the AI Advisor with your text filled in |
+
+Say `help` for the full list. Doses and toxic foods are refused here exactly as in the Advisor, and medication tasks carry the vet flag.
+
+A quick tour: add a pet in **My Pets** (e.g. Rex, dog), open **AI Advisor**, type a request, review the proposal, tick the tasks you want, click **Add approved tasks**, then **View today's schedule** and **Generate schedule**. Text you typed and boxes you ticked in the advisor are kept if you switch sections and come back. Hero photo: Krista Mangulsone, CC0 (see `assets/CREDITS.md`).
 
 ## Sample interactions
 Outputs below are real, produced with the offline `MockClient`.
@@ -73,7 +100,7 @@ Outputs below are real, produced with the offline `MockClient`.
 - **Small, additive change to the original scheduler.** `Task` gained a `fixed_time` flag; tasks with it are placed exactly at their `start_time` and others work around them. Tasks without the flag behave exactly as before (the 65 original tests are unchanged), and pet rest blocks (category `rest`) don't use the owner's time budget.
 
 ## Testing summary
-Offline, `pytest -q`: **135 passed** (65 original PawPal+ tests plus 70 new: retriever, guardrails, confidence, agent, logging, LLM fallback, request parser, knowledge store, scheduler pinning, and 4 Streamlit UI tests via `AppTest`).
+Offline, `pytest -q`: **202 passed** (65 original PawPal+ tests plus 137 new, including 44 for the chat assistant: retriever, guardrails, confidence, agent, logging, LLM fallback, request parser, knowledge store, scheduler pinning, and 27 Streamlit UI tests via `AppTest`, including navigation and state-persistence tests).
 Eval harness (`python -m eval.run_eval`, MockClient): **17/17 cases passed, average confidence 89/100, 2 tasks blocked by guardrails** (see `eval/results.md`):
 
 | ID | Case | Result |
@@ -104,7 +131,9 @@ The biggest lesson was that the reliable part of an AI system is mostly the code
 
 ## Project layout
 ```
-app.py, pawpal_system.py, pawpal_format.py   original PawPal+ (app.py extended)
+app.py, pawpal_system.py, pawpal_format.py   original PawPal+ (app.py extended: sidebar navigation + advisor)
+assets/              hero photo and credits      .streamlit/  theme
+ai/chat_assistant.py chat command parser and actions (no Streamlit code)
 ai/                  retriever, llm_client, agent, guardrails, confidence, logger, prompts/
 knowledge/           care guideline documents (the RAG corpus)
 eval/                cases.json, run_eval.py, results.md

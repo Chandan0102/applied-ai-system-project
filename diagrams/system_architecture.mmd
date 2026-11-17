@@ -36,3 +36,12 @@ flowchart TD
     EVAL[[Reliability harness<br/>eval/run_eval.py + pytest]] -. drives the same pipeline with scripted cases .-> SAN
     EVAL -. writes .-> RES[(eval/results.md)]
     DEV([Developer]) -. reviews results and traces .-> RES
+
+    CHAT([Owner: floating chat bubble]) -->|plain-English command| CRULES[Chat rule parser<br/>ai/chat_assistant.py]
+    CRULES -- not understood and Gemini selected --> CLLM[Gemini classifies intent<br/>output validated like rule output]
+    CRULES -- navigate / select pet / list --> UIST[UI state: tab, pet, filters]
+    CRULES -- add task / add pet / complete task --> CGUARD[Same guardrails: dose, toxic, bounds, vet flag]
+    CLLM --> CGUARD
+    CGUARD --> CCONF{{Human-in-the-loop:<br/>Confirm or Cancel card}}
+    CCONF -- confirmed --> SCH
+    CRULES -- routine request --> UI
