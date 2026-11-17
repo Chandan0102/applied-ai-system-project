@@ -1,0 +1,7 @@
+Example
+REQUEST: routine for my senior cat
+CONTEXT:
+[cat_care#feeding]
+- Task: Measured breakfast | 5 min | daily | high | morning
+OUTPUT:
+{"tasks":[{"title":"Measured breakfast","duration_minutes":5,"priority":"high","frequency":"daily","preferred_time":"morning","sources":["cat_care#feeding"]}]}

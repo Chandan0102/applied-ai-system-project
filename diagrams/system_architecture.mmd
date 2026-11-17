@@ -1,0 +1,38 @@
+flowchart TD
+    U([Pet owner]) -->|natural-language request| UI[Streamlit UI: AI Care Advisor]
+    UI --> SAN[Guardrail 1: sanitize input<br/>strip prompt injection, reject empty]
+    SAN --> PLAN[Planner<br/>species, age, life stage, condition]
+    PLAN --> REQ[Request parser regex<br/>owner-requested activities and times]
+    PLAN --> REL{On-topic pet care request?}
+    REL -- no --> REF[Refuse: no evidence, do not guess]
+    REL -- yes --> RET[Retriever TF-IDF]
+    KB[(knowledge/*.md<br/>care guidelines)] --> RET
+    OWN[(Owner pet profiles<br/>age, species, special needs)] --> RET
+    RET -- retrieved chunks with ids --> LLM[LLM: Gemini or offline MockClient<br/>builds tasks only from context, cites chunk ids]
+    LLM --> VER[Guardrail 2: verifier<br/>schema, citation, grounding, dose, toxic,<br/>life stage, duplicate, time budget]
+    VER -- blocking issues and rounds left --> FB[Feedback to LLM]
+    FB --> LLM
+    VER -- passes or rounds exhausted --> DROP[Drop still-blocked tasks]
+    DROP --> CONF[Confidence score 0-100]
+    CONF -- too low or no tasks --> REF
+    REQ --> MATCH{Activity in knowledge base?}
+    KB --> MATCH
+    MATCH -- yes --> CITED[Cited task at requested time]
+    MATCH -- no --> UNAPP[Not-in-knowledge task, no source<br/>safety rules still apply]
+    CONF --> HUMAN
+    CITED --> HUMAN
+    UNAPP --> HUMAN{{Human-in-the-loop:<br/>owner reviews sources, flags, confidence<br/>and approves each task<br/>not-in-knowledge items listed last}}
+    HUMAN -- Add to knowledge base --> KB
+    HUMAN -- approved tasks only --> SCH[Owner / Pet / Scheduler<br/>pins fixed-time tasks, others fill around them]
+    SCH --> PLANOUT([Daily plan with explanations])
+
+    LOG[(logs/agent_log.jsonl)]
+    SAN -.-> LOG
+    RET -.-> LOG
+    LLM -.-> LOG
+    VER -.-> LOG
+    CONF -.-> LOG
+
+    EVAL[[Reliability harness<br/>eval/run_eval.py + pytest]] -. drives the same pipeline with scripted cases .-> SAN
+    EVAL -. writes .-> RES[(eval/results.md)]
+    DEV([Developer]) -. reviews results and traces .-> RES
